@@ -29,6 +29,8 @@ from einops import rearrange
 from pydantic import BaseModel
 from tqdm import tqdm
 from transformers import LlamaTokenizerFast
+import time
+import numpy as np
 
 from ..modules.audiovae import AudioVAE
 from ..modules.layers import ScalarQuantizationLayer
@@ -147,28 +149,67 @@ class VoxCPMModel(nn.Module):
         self.chunk_size = audio_vae.chunk_size
         self.sample_rate = audio_vae.sample_rate
 
-    
+        self.calib_dir_enc_to_lm_proj = "calib_enc_to_lm_proj"
+        if eval(os.getenv("save_calib", "False")):
+            if os.path.exists(self.calib_dir_enc_to_lm_proj):
+                os.removedirs(self.calib_dir_enc_to_lm_proj)
+            os.makedirs(self.calib_dir_enc_to_lm_proj)
+
+        self.calib_dir_lm_to_dit_proj = "calib_lm_to_dit_proj"
+        if eval(os.getenv("save_calib", "False")):
+            if os.path.exists(self.calib_dir_lm_to_dit_proj):
+                os.removedirs(self.calib_dir_lm_to_dit_proj)
+            os.makedirs(self.calib_dir_lm_to_dit_proj)
+
+        self.calib_dir_res_to_dit_proj = "calib_res_to_dit_proj"
+        if eval(os.getenv("save_calib", "False")):
+            if os.path.exists(self.calib_dir_res_to_dit_proj):
+                os.removedirs(self.calib_dir_res_to_dit_proj)
+            os.makedirs(self.calib_dir_res_to_dit_proj)
+
+        self.calib_dir_stop_predictor = "calib_stop_predictor"
+        if eval(os.getenv("save_calib", "False")):
+            if os.path.exists(self.calib_dir_stop_predictor):
+                os.removedirs(self.calib_dir_stop_predictor)
+            os.makedirs(self.calib_dir_stop_predictor)
+
+
+    def predict_stop(self, x):
+        if eval(os.getenv("save_calib", "False")):
+            t_str = str(time.time())
+            np.save(f"{self.calib_dir_stop_predictor}/stop_predictor.x.{t_str}.npy", x.detach().cpu().numpy())
+
+        ret = self.stop_head(self.stop_actn(self.stop_proj(x))).argmax(dim=-1)
+        
+        return ret
+
     def optimize(self, disable: bool = False):
-        try:
-            if disable:
-                raise ValueError("Optimization disabled by user")
-            if self.device != "cuda":
-                raise ValueError("VoxCPMModel can only be optimized on CUDA device")
-            try:
-                import triton
-            except:
-                raise ValueError("triton is not installed")
-            self.base_lm.forward_step = torch.compile(self.base_lm.forward_step, mode="reduce-overhead", fullgraph=True)
-            self.residual_lm.forward_step = torch.compile(self.residual_lm.forward_step, mode="reduce-overhead", fullgraph=True)
-            self.feat_encoder_step = torch.compile(self.feat_encoder, mode="reduce-overhead", fullgraph=True)
-            self.feat_decoder.estimator = torch.compile(self.feat_decoder.estimator, mode="reduce-overhead", fullgraph=True)
-        except Exception as e:
-            print(f"Error: {e}")
-            print("Warning: VoxCPMModel can not be optimized by torch.compile, using original forward_step functions")
-            self.base_lm.forward_step = self.base_lm.forward_step
-            self.residual_lm.forward_step = self.residual_lm.forward_step
-            self.feat_encoder_step = self.feat_encoder
-            self.feat_decoder.estimator = self.feat_decoder.estimator
+        # try:
+        #     if disable:
+        #         raise ValueError("Optimization disabled by user")
+        #     if self.device != "cuda":
+        #         raise ValueError("VoxCPMModel can only be optimized on CUDA device")
+        #     try:
+        #         import triton
+        #     except:
+        #         raise ValueError("triton is not installed")
+        #     self.base_lm.forward_step = torch.compile(self.base_lm.forward_step, mode="reduce-overhead", fullgraph=True)
+        #     self.residual_lm.forward_step = torch.compile(self.residual_lm.forward_step, mode="reduce-overhead", fullgraph=True)
+        #     self.feat_encoder_step = torch.compile(self.feat_encoder, mode="reduce-overhead", fullgraph=True)
+        #     self.feat_decoder.estimator = torch.compile(self.feat_decoder.estimator, mode="reduce-overhead", fullgraph=True)
+        # except Exception as e:
+        #     print(f"Error: {e}")
+        #     print("Warning: VoxCPMModel can not be optimized by torch.compile, using original forward_step functions")
+        #     self.base_lm.forward_step = self.base_lm.forward_step
+        #     self.residual_lm.forward_step = self.residual_lm.forward_step
+        #     self.feat_encoder_step = self.feat_encoder
+        #     self.feat_decoder.estimator = self.feat_decoder.estimator
+        # return self
+
+        self.base_lm.forward_step = self.base_lm.forward_step
+        self.residual_lm.forward_step = self.residual_lm.forward_step
+        self.feat_encoder_step = self.feat_encoder
+        self.feat_decoder.estimator = self.feat_decoder.estimator
         return self
 
 
@@ -271,7 +312,7 @@ class VoxCPMModel(nn.Module):
 
         text_token = text_token.unsqueeze(0).to(self.device)
         text_mask = text_mask.unsqueeze(0).to(self.device)
-        audio_feat = audio_feat.unsqueeze(0).to(self.device).to(torch.bfloat16)
+        audio_feat = audio_feat.unsqueeze(0).to(self.device).to(get_dtype(self.config.dtype))
         audio_mask = audio_mask.unsqueeze(0).to(self.device)
 
         target_text_length = len(self.text_tokenizer(target_text))
@@ -484,7 +525,7 @@ class VoxCPMModel(nn.Module):
 
         text_token = text_token.unsqueeze(0).to(self.device)
         text_mask = text_mask.unsqueeze(0).to(self.device)
-        audio_feat = audio_feat.unsqueeze(0).to(self.device).to(torch.bfloat16)
+        audio_feat = audio_feat.unsqueeze(0).to(self.device).to(get_dtype(self.config.dtype))
         audio_mask = audio_mask.unsqueeze(0).to(self.device)
     
         # run inference
@@ -610,6 +651,12 @@ class VoxCPMModel(nn.Module):
 
 
         for i in tqdm(range(max_len)):
+            if eval(os.getenv("save_calib", "False")):
+                t_str = str(time.time())
+                np.save(f"{self.calib_dir_lm_to_dit_proj}/lm_to_dit_proj.lm_hidden.{t_str}.npy", lm_hidden.detach().cpu().numpy())
+            if eval(os.getenv("save_calib", "False")):
+                t_str = str(time.time())
+                np.save(f"{self.calib_dir_res_to_dit_proj}/res_to_dit_proj.residual_hidden.{t_str}.npy", residual_hidden.detach().cpu().numpy())
             dit_hidden_1 = self.lm_to_dit_proj(lm_hidden)  # [b, h_dit]
             dit_hidden_2 = self.res_to_dit_proj(residual_hidden)  # [b, h_dit]
             dit_hidden = dit_hidden_1 + dit_hidden_2  # [b, h_dit]
@@ -625,6 +672,9 @@ class VoxCPMModel(nn.Module):
             )  # [b, p, d]
             
             curr_embed = self.feat_encoder_step(pred_feat.unsqueeze(1))  # b, 1, c
+            if eval(os.getenv("save_calib", "False")):
+                t_str = str(time.time())
+                np.save(f"{self.calib_dir_enc_to_lm_proj}/enc_to_lm_proj.curr_embed.{t_str}.npy", curr_embed.detach().cpu().numpy())
             curr_embed = self.enc_to_lm_proj(curr_embed)
             
             pred_feat_seq.append(pred_feat.unsqueeze(1))  # b, 1, p, d
@@ -635,8 +685,8 @@ class VoxCPMModel(nn.Module):
                 pred_feat_chunk = torch.cat(pred_feat_seq[-3:], dim=1)
                 feat_pred = rearrange(pred_feat_chunk, "b t p d -> b d (t p)", b=B, p=self.patch_size)
                 yield feat_pred, pred_feat_seq
-            
-            stop_flag = self.stop_head(self.stop_actn(self.stop_proj(lm_hidden))).argmax(dim=-1)[0].cpu().item()
+            # stop_flag = self.stop_head(self.stop_actn(self.stop_proj(lm_hidden))).argmax(dim=-1)[0].cpu().item()
+            stop_flag = self.predict_stop(lm_hidden)[0].cpu().item()
             if i > min_len and stop_flag == 1:
                 break
     
@@ -659,7 +709,7 @@ class VoxCPMModel(nn.Module):
     @classmethod
     def from_local(cls, path: str, optimize: bool = True):
         config = VoxCPMConfig.model_validate_json(open(os.path.join(path, "config.json")).read())
-
+        config.dtype = "float32"
         tokenizer = LlamaTokenizerFast.from_pretrained(path)
 
         audio_vae = AudioVAE()
