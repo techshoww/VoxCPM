@@ -35,6 +35,7 @@ from ..modules.layers import ScalarQuantizationLayer
 from ..modules.locdit import CfmConfig, UnifiedCFM, VoxCPMLocDiT
 from ..modules.locenc import VoxCPMLocEnc
 from ..modules.minicpm4 import MiniCPM4Config, MiniCPMModel
+from ..npu_infer.utils_lm import MiniCPMModel_AXInfer
 from .utils import get_dtype, mask_multichar_chinese_tokens
 
 
@@ -88,8 +89,10 @@ class VoxCPMModel(nn.Module):
             self.device = "cpu"
 
         # Text-Semantic LM
-        self.base_lm = MiniCPMModel(config.lm_config)
-        self.base_lm.setup_cache(1, config.max_length, self.device, get_dtype(config.dtype))
+        # self.base_lm = MiniCPMModel(config.lm_config)
+        # self.base_lm.setup_cache(1, config.max_length, self.device, get_dtype(config.dtype))
+        self.base_lm = MiniCPMModel_AXInfer(config.lm_config, "../../VoxCPM.Axera/model_convert/base_lm-axmodels/", 
+                                            "MiniCPMForCausalLM", 256, 512, chunk_len=64)
 
         self.text_tokenizer = mask_multichar_chinese_tokens(tokenizer)
         self.audio_start_token = 101
@@ -99,8 +102,10 @@ class VoxCPMModel(nn.Module):
         residual_lm_config = config.lm_config.model_copy(deep=True)
         residual_lm_config.num_hidden_layers = config.residual_lm_num_layers
         residual_lm_config.vocab_size = 0
-        self.residual_lm = MiniCPMModel(residual_lm_config)
-        self.residual_lm.setup_cache(1, config.max_length, self.device, get_dtype(config.dtype))
+        # self.residual_lm = MiniCPMModel(residual_lm_config)
+        # self.residual_lm.setup_cache(1, config.max_length, self.device, get_dtype(config.dtype))
+        self.residual_lm = MiniCPMModel_AXInfer(residual_lm_config, "../../VoxCPM.Axera/model_convert/residual_lm-axmodels/", 
+                                            "MiniCPMForCausalLM", 256, 512, chunk_len=64)
 
         # Local Encoder
         encoder_config = config.lm_config.model_copy(deep=True)
@@ -149,28 +154,33 @@ class VoxCPMModel(nn.Module):
 
     
     def optimize(self, disable: bool = False):
-        try:
-            if disable:
-                raise ValueError("Optimization disabled by user")
-            if self.device != "cuda":
-                raise ValueError("VoxCPMModel can only be optimized on CUDA device")
-            try:
-                import triton
-            except:
-                raise ValueError("triton is not installed")
-            self.base_lm.forward_step = torch.compile(self.base_lm.forward_step, mode="reduce-overhead", fullgraph=True)
-            self.residual_lm.forward_step = torch.compile(self.residual_lm.forward_step, mode="reduce-overhead", fullgraph=True)
-            self.feat_encoder_step = torch.compile(self.feat_encoder, mode="reduce-overhead", fullgraph=True)
-            self.feat_decoder.estimator = torch.compile(self.feat_decoder.estimator, mode="reduce-overhead", fullgraph=True)
-        except Exception as e:
-            print(f"Error: {e}")
-            print("Warning: VoxCPMModel can not be optimized by torch.compile, using original forward_step functions")
-            self.base_lm.forward_step = self.base_lm.forward_step
-            self.residual_lm.forward_step = self.residual_lm.forward_step
-            self.feat_encoder_step = self.feat_encoder
-            self.feat_decoder.estimator = self.feat_decoder.estimator
-        return self
+        # try:
+        #     if disable:
+        #         raise ValueError("Optimization disabled by user")
+        #     if self.device != "cuda":
+        #         raise ValueError("VoxCPMModel can only be optimized on CUDA device")
+        #     try:
+        #         import triton
+        #     except:
+        #         raise ValueError("triton is not installed")
+        #     self.base_lm.forward_step = torch.compile(self.base_lm.forward_step, mode="reduce-overhead", fullgraph=True)
+        #     self.residual_lm.forward_step = torch.compile(self.residual_lm.forward_step, mode="reduce-overhead", fullgraph=True)
+        #     self.feat_encoder_step = torch.compile(self.feat_encoder, mode="reduce-overhead", fullgraph=True)
+        #     self.feat_decoder.estimator = torch.compile(self.feat_decoder.estimator, mode="reduce-overhead", fullgraph=True)
+        # except Exception as e:
+        #     print(f"Error: {e}")
+        #     print("Warning: VoxCPMModel can not be optimized by torch.compile, using original forward_step functions")
+        #     self.base_lm.forward_step = self.base_lm.forward_step
+        #     self.residual_lm.forward_step = self.residual_lm.forward_step
+        #     self.feat_encoder_step = self.feat_encoder
+        #     self.feat_decoder.estimator = self.feat_decoder.estimator
+        # return self
 
+        self.base_lm.forward_step = self.base_lm.forward_step
+        self.residual_lm.forward_step = self.residual_lm.forward_step
+        self.feat_encoder_step = self.feat_encoder
+        self.feat_decoder.estimator = self.feat_decoder.estimator
+        return self
 
     def generate(self, *args, **kwargs) -> torch.Tensor:
         return next(self._generate(*args, streaming=False, **kwargs))
@@ -271,7 +281,7 @@ class VoxCPMModel(nn.Module):
 
         text_token = text_token.unsqueeze(0).to(self.device)
         text_mask = text_mask.unsqueeze(0).to(self.device)
-        audio_feat = audio_feat.unsqueeze(0).to(self.device).to(torch.bfloat16)
+        audio_feat = audio_feat.unsqueeze(0).to(self.device)
         audio_mask = audio_mask.unsqueeze(0).to(self.device)
 
         target_text_length = len(self.text_tokenizer(target_text))
@@ -484,7 +494,7 @@ class VoxCPMModel(nn.Module):
 
         text_token = text_token.unsqueeze(0).to(self.device)
         text_mask = text_mask.unsqueeze(0).to(self.device)
-        audio_feat = audio_feat.unsqueeze(0).to(self.device).to(torch.bfloat16)
+        audio_feat = audio_feat.unsqueeze(0).to(self.device)
         audio_mask = audio_mask.unsqueeze(0).to(self.device)
     
         # run inference
@@ -591,24 +601,30 @@ class VoxCPMModel(nn.Module):
         pred_feat_seq = []  # b, t, p, d
         curr_embed = None
 
-        enc_outputs, kv_cache_tuple = self.base_lm(
-            inputs_embeds=combined_embed,
-            is_causal=True,
-        )
-        self.base_lm.kv_cache.fill_caches(kv_cache_tuple)
+        # enc_outputs, kv_cache_tuple = self.base_lm(
+        #     inputs_embeds=combined_embed,
+        #     is_causal=True,
+        # )
+        # self.base_lm.kv_cache.fill_caches(kv_cache_tuple)
+
+        enc_outputs = self.base_lm(combined_embed).to(combined_embed.device)
+        prefill_len = combined_embed.shape[1]
         
         enc_outputs = self.fsq_layer(enc_outputs) * feat_mask.unsqueeze(-1) + enc_outputs * text_mask.unsqueeze(-1)
         lm_hidden = enc_outputs[:, -1, :]
 
          
-        residual_enc_outputs, residual_kv_cache_tuple = self.residual_lm(
-            inputs_embeds=enc_outputs + feat_mask.unsqueeze(-1) * feat_embed,
-            is_causal=True,
-        )
-        self.residual_lm.kv_cache.fill_caches(residual_kv_cache_tuple)
+        # residual_enc_outputs, residual_kv_cache_tuple = self.residual_lm(
+        #     inputs_embeds=enc_outputs + feat_mask.unsqueeze(-1) * feat_embed,
+        #     is_causal=True,
+        # )
+        # self.residual_lm.kv_cache.fill_caches(residual_kv_cache_tuple)
+
+        residual_enc_outputs = self.residual_lm(enc_outputs + feat_mask.unsqueeze(-1) * feat_embed).to(enc_outputs.device)
+
         residual_hidden = residual_enc_outputs[:, -1, :]
 
-
+        postion_id = prefill_len
         for i in tqdm(range(max_len)):
             dit_hidden_1 = self.lm_to_dit_proj(lm_hidden)  # [b, h_dit]
             dit_hidden_2 = self.res_to_dit_proj(residual_hidden)  # [b, h_dit]
@@ -640,15 +656,19 @@ class VoxCPMModel(nn.Module):
             if i > min_len and stop_flag == 1:
                 break
     
-            lm_hidden = self.base_lm.forward_step(
-                curr_embed[:, 0, :], torch.tensor([self.base_lm.kv_cache.step()], device=curr_embed.device)
-            ).clone()
-           
+            # lm_hidden = self.base_lm.forward_step(
+            #     curr_embed[:, 0, :], torch.tensor([self.base_lm.kv_cache.step()], device=curr_embed.device)
+            # ).clone()
+            lm_hidden = self.base_lm.forward_step(curr_embed[:, 0, :], postion_id).to(curr_embed.device)
 
             lm_hidden = self.fsq_layer(lm_hidden)
-            residual_hidden = self.residual_lm.forward_step(
-                lm_hidden + curr_embed[:, 0, :], torch.tensor([self.residual_lm.kv_cache.step()], device=curr_embed.device)
-            ).clone()
+            # residual_hidden = self.residual_lm.forward_step(
+            #     lm_hidden + curr_embed[:, 0, :], torch.tensor([self.residual_lm.kv_cache.step()], device=curr_embed.device)
+            # ).clone()
+
+            residual_hidden = self.residual_lm.forward_step(lm_hidden + curr_embed[:, 0, :], postion_id).to(curr_embed.device).clone()
+
+            postion_id += 1
                 
         if not streaming:
             pred_feat_seq = torch.cat(pred_feat_seq, dim=1)  # b, t, p, d
@@ -659,7 +679,7 @@ class VoxCPMModel(nn.Module):
     @classmethod
     def from_local(cls, path: str, optimize: bool = True):
         config = VoxCPMConfig.model_validate_json(open(os.path.join(path, "config.json")).read())
-
+        config.dtype = "float32"
         tokenizer = LlamaTokenizerFast.from_pretrained(path)
 
         audio_vae = AudioVAE()
@@ -682,5 +702,5 @@ class VoxCPMModel(nn.Module):
 
         for kw, val in vae_state_dict.items():
             model_state_dict[f"audio_vae.{kw}"] = val
-        model.load_state_dict(model_state_dict, strict=True)
+        model.load_state_dict(model_state_dict, strict=False)
         return model.to(model.device).eval().optimize(disable=not optimize)
