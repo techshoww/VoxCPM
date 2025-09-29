@@ -6,7 +6,9 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from torch.nn.utils import weight_norm
-
+import os
+if os.getenv("AX_INFER", "false").lower() == "true":
+    from ...npu_infer.utils_axinfer import AxModelInfer
 
 def WNConv1d(*args, **kwargs):
     return weight_norm(nn.Conv1d(*args, **kwargs))
@@ -297,22 +299,28 @@ class AudioVAE(nn.Module):
 
         self.latent_dim = latent_dim
         self.hop_length = np.prod(encoder_rates)
-        self.encoder = CausalEncoder(
-            encoder_dim,
-            latent_dim,
-            encoder_rates,
-            depthwise=depthwise,
-        )
-
-        self.decoder = CausalDecoder(
-            latent_dim,
-            decoder_dim,
-            decoder_rates,
-            depthwise=depthwise,
-            use_noise_block=use_noise_block,
-        )
         self.sample_rate = sample_rate
         self.chunk_size = math.prod(encoder_rates)
+        
+        if os.getenv("AX_INFER", "false").lower() != "true":
+            self.encoder = CausalEncoder(
+                encoder_dim,
+                latent_dim,
+                encoder_rates,
+                depthwise=depthwise,
+            )
+
+            self.decoder = CausalDecoder(
+                latent_dim,
+                decoder_dim,
+                decoder_rates,
+                depthwise=depthwise,
+                use_noise_block=use_noise_block,
+            )
+            
+        else:
+            self.encoder = AxModelInfer("../../VoxCPM.Axera/model_convert/audio_vae.encoder.onnx")
+            self.decoder = AxModelInfer("../../VoxCPM.Axera/model_convert/audio_vae.decoder.onnx")
 
     def preprocess(self, audio_data, sample_rate):
         if sample_rate is None:
@@ -342,7 +350,14 @@ class AudioVAE(nn.Module):
             "audio" : Tensor[B x 1 x length]
                 Decoded audio data.
         """
-        return self.decoder(z)
+        if os.getenv("AX_INFER", "false").lower() != "true":
+            return self.decoder(z)
+        else:
+            device = z.device
+            input = {"x":z.detach().cpu().numpy()}
+            output = self.decoder(input)[0]
+            output = torch.from_numpy(output).to(device)
+            return output
 
     def encode(self, audio_data: torch.Tensor, sample_rate: int):
         """
@@ -356,4 +371,11 @@ class AudioVAE(nn.Module):
             audio_data = audio_data.unsqueeze(1)
 
         audio_data = self.preprocess(audio_data, sample_rate)
-        return self.encoder(audio_data)["mu"]
+        if os.getenv("AX_INFER", "false").lower() != "true":
+            return self.encoder(audio_data)["mu"]
+        else:
+            device = audio_data.device
+            input = {"x":audio_data.detach().cpu().numpy()}
+            output = self.encoder(input)[0]
+            output = torch.from_numpy(output).to(device)
+            return output

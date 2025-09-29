@@ -2,8 +2,10 @@ import torch
 from ..minicpm4 import MiniCPMModel, MiniCPM4Config
 import torch.nn as nn
 import math
-from ...npu_infer.utils_lm import MiniCPMModel_AXInfer 
-from ...npu_infer.utils_axinfer import AxModelInfer
+import os
+if os.getenv("AX_INFER", "false").lower() == "true":
+    from ...npu_infer.utils_lm import MiniCPMModel_AXInfer 
+    from ...npu_infer.utils_axinfer import AxModelInfer
 class SinusoidalPosEmb(torch.nn.Module):
     def __init__(self, dim):
         super().__init__()
@@ -70,30 +72,33 @@ class VoxCPMLocDiT(nn.Module):
         in_channels: int = 64,
     ):
         super().__init__()
-        # self.in_channels = in_channels
-        # self.out_channels = in_channels
         self.config = config
 
-        # self.in_proj = nn.Linear(in_channels, config.hidden_size, bias=True)
-        # self.cond_proj = nn.Linear(in_channels, config.hidden_size, bias=True)
-        # self.out_proj = nn.Linear(config.hidden_size, self.out_channels, bias=True)
-
-        # self.time_embeddings = SinusoidalPosEmb(config.hidden_size)
-        # self.time_mlp = TimestepEmbedding(
-        #     in_channels=config.hidden_size,
-        #     time_embed_dim=config.hidden_size,
-        # )
-        # self.delta_time_mlp = TimestepEmbedding(
-        #     in_channels=config.hidden_size,
-        #     time_embed_dim=config.hidden_size,
-        # )
-
-        self.part1 = AxModelInfer("../../VoxCPM.Axera/model_convert/axmodels/locdit.part1.axmodel")
-        self.part3 = AxModelInfer("../../VoxCPM.Axera/model_convert/axmodels/locdit.part3.axmodel")
         assert config.vocab_size == 0, "vocab_size must be 0 for local DiT"
-        # self.decoder = MiniCPMModel(config)
-        self.decoder = MiniCPMModel_AXInfer(config, "../../VoxCPM.Axera/model_convert/feat_decoder_estimator_decoder-axmodels/", 
-                                            "MiniCPMForCausalLM", 256, 512, chunk_len=64)
+        if os.getenv("AX_INFER", "false").lower() != "true":
+            self.in_channels = in_channels
+            self.out_channels = in_channels
+            
+            self.in_proj = nn.Linear(in_channels, config.hidden_size, bias=True)
+            self.cond_proj = nn.Linear(in_channels, config.hidden_size, bias=True)
+            self.out_proj = nn.Linear(config.hidden_size, self.out_channels, bias=True)
+
+            self.time_embeddings = SinusoidalPosEmb(config.hidden_size)
+            self.time_mlp = TimestepEmbedding(
+                in_channels=config.hidden_size,
+                time_embed_dim=config.hidden_size,
+            )
+            self.delta_time_mlp = TimestepEmbedding(
+                in_channels=config.hidden_size,
+                time_embed_dim=config.hidden_size,
+            )
+            self.decoder = MiniCPMModel(config)
+        else:
+            axmodel_dir = os.getenv("AXMODEL_DIR")
+            self.part1 = AxModelInfer(f"{axmodel_dir}/axmodels/locdit.part1.axmodel")
+            self.part3 = AxModelInfer(f"{axmodel_dir}/axmodels/locdit.part3.axmodel")
+            self.decoder = MiniCPMModel_AXInfer(config, f"{axmodel_dir}/feat_decoder_estimator_decoder-axmodels/", 
+                                                "MiniCPMForCausalLM", 256, 512, chunk_len=64)
 
 
     def forward(
@@ -112,10 +117,29 @@ class VoxCPMLocDiT(nn.Module):
         cond: (N, C, T') tensor of prefix conditions
         dt: (N,) used for mean velocity (may be supported in the future...)
         """
-        x = self.forward_part1(x, mu, t, cond, dt)
-        hidden = self.forward_part2(x)
-        output = self.forward_part3(hidden)
-        return output
+        if os.getenv("AX_INFER", "false").lower() != "true":
+            x = self.in_proj(x.transpose(1, 2).contiguous())
+
+            cond = self.cond_proj(cond.transpose(1, 2).contiguous())
+            prefix = cond.size(1)
+            assert prefix==2, f"prefix:{prefix}"
+            t = self.time_embeddings(t).to(x.dtype)
+            t = self.time_mlp(t)
+            dt = self.time_embeddings(dt).to(x.dtype)
+            dt = self.delta_time_mlp(dt)
+            t = t + dt
+
+            x = torch.cat([(mu + t).unsqueeze(1), cond, x], dim=1)
+            hidden, _ = self.decoder(x, is_causal=False)
+            hidden = hidden[:, prefix + 1 :, :]
+            hidden = self.out_proj(hidden)
+
+            return hidden.transpose(1, 2).contiguous()
+        else:
+            x = self.forward_part1(x, mu, t, cond, dt)
+            hidden = self.forward_part2(x)
+            output = self.forward_part3(hidden)
+            return output
     
     def forward_part1(
         self,
@@ -159,7 +183,7 @@ class VoxCPMLocDiT(nn.Module):
         
         hidden = []
         for i in range(x.shape[0]):
-            output = self.decoder(x[i:i+1])
+            output = self.decoder(x[i:i+1], is_causal=False)
             hidden.append(output)
         hidden = torch.cat(hidden, 0)
 

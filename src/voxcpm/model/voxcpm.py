@@ -35,7 +35,8 @@ from ..modules.layers import ScalarQuantizationLayer
 from ..modules.locdit import CfmConfig, UnifiedCFM, VoxCPMLocDiT
 from ..modules.locenc import VoxCPMLocEnc
 from ..modules.minicpm4 import MiniCPM4Config, MiniCPMModel
-from ..npu_infer.utils_lm import MiniCPMModel_AXInfer
+if os.getenv("AX_INFER", "false").lower() == "true":
+    from ..npu_infer.utils_lm import MiniCPMModel_AXInfer
 from .utils import get_dtype, mask_multichar_chinese_tokens
 
 
@@ -89,10 +90,13 @@ class VoxCPMModel(nn.Module):
             self.device = "cpu"
 
         # Text-Semantic LM
-        # self.base_lm = MiniCPMModel(config.lm_config)
-        # self.base_lm.setup_cache(1, config.max_length, self.device, get_dtype(config.dtype))
-        self.base_lm = MiniCPMModel_AXInfer(config.lm_config, "../../VoxCPM.Axera/model_convert/base_lm-axmodels/", 
-                                            "MiniCPMForCausalLM", 256, 512, chunk_len=64)
+        if os.getenv("AX_INFER", "false").lower() != "true":
+            self.base_lm = MiniCPMModel(config.lm_config)
+            self.base_lm.setup_cache(1, config.max_length, self.device, get_dtype(config.dtype))
+        else:
+            axmodel_dir = os.getenv("AXMODEL_DIR")
+            self.base_lm = MiniCPMModel_AXInfer(config.lm_config, f"{axmodel_dir}/base_lm-axmodels/", 
+                                                "MiniCPMForCausalLM", 256, 512, chunk_len=64)
 
         self.text_tokenizer = mask_multichar_chinese_tokens(tokenizer)
         self.audio_start_token = 101
@@ -102,9 +106,12 @@ class VoxCPMModel(nn.Module):
         residual_lm_config = config.lm_config.model_copy(deep=True)
         residual_lm_config.num_hidden_layers = config.residual_lm_num_layers
         residual_lm_config.vocab_size = 0
-        # self.residual_lm = MiniCPMModel(residual_lm_config)
-        # self.residual_lm.setup_cache(1, config.max_length, self.device, get_dtype(config.dtype))
-        self.residual_lm = MiniCPMModel_AXInfer(residual_lm_config, "../../VoxCPM.Axera/model_convert/residual_lm-axmodels/", 
+        if os.getenv("AX_INFER", "false").lower() != "true":
+            self.residual_lm = MiniCPMModel(residual_lm_config)
+            self.residual_lm.setup_cache(1, config.max_length, self.device, get_dtype(config.dtype))
+        else:
+            axmodel_dir = os.getenv("AXMODEL_DIR")
+            self.residual_lm = MiniCPMModel_AXInfer(residual_lm_config, f"{axmodel_dir}/residual_lm-axmodels/", 
                                             "MiniCPMForCausalLM", 256, 512, chunk_len=64)
 
         # Local Encoder
@@ -601,26 +608,28 @@ class VoxCPMModel(nn.Module):
         pred_feat_seq = []  # b, t, p, d
         curr_embed = None
 
-        # enc_outputs, kv_cache_tuple = self.base_lm(
-        #     inputs_embeds=combined_embed,
-        #     is_causal=True,
-        # )
-        # self.base_lm.kv_cache.fill_caches(kv_cache_tuple)
-
-        enc_outputs = self.base_lm(combined_embed).to(combined_embed.device)
+        if os.getenv("AX_INFER", "false").lower() != "true":
+            enc_outputs, kv_cache_tuple = self.base_lm(
+                inputs_embeds=combined_embed,
+                is_causal=True,
+            )
+            self.base_lm.kv_cache.fill_caches(kv_cache_tuple)
+        else:
+            enc_outputs = self.base_lm(combined_embed).to(combined_embed.device)
+            
         prefill_len = combined_embed.shape[1]
         
         enc_outputs = self.fsq_layer(enc_outputs) * feat_mask.unsqueeze(-1) + enc_outputs * text_mask.unsqueeze(-1)
         lm_hidden = enc_outputs[:, -1, :]
 
-         
-        # residual_enc_outputs, residual_kv_cache_tuple = self.residual_lm(
-        #     inputs_embeds=enc_outputs + feat_mask.unsqueeze(-1) * feat_embed,
-        #     is_causal=True,
-        # )
-        # self.residual_lm.kv_cache.fill_caches(residual_kv_cache_tuple)
-
-        residual_enc_outputs = self.residual_lm(enc_outputs + feat_mask.unsqueeze(-1) * feat_embed).to(enc_outputs.device)
+        if os.getenv("AX_INFER", "false").lower() != "true":
+            residual_enc_outputs, residual_kv_cache_tuple = self.residual_lm(
+                inputs_embeds=enc_outputs + feat_mask.unsqueeze(-1) * feat_embed,
+                is_causal=True,
+            )
+            self.residual_lm.kv_cache.fill_caches(residual_kv_cache_tuple)
+        else:
+            residual_enc_outputs = self.residual_lm(enc_outputs + feat_mask.unsqueeze(-1) * feat_embed).to(enc_outputs.device)
 
         residual_hidden = residual_enc_outputs[:, -1, :]
 
@@ -656,17 +665,20 @@ class VoxCPMModel(nn.Module):
             if i > min_len and stop_flag == 1:
                 break
     
-            # lm_hidden = self.base_lm.forward_step(
-            #     curr_embed[:, 0, :], torch.tensor([self.base_lm.kv_cache.step()], device=curr_embed.device)
-            # ).clone()
-            lm_hidden = self.base_lm.forward_step(curr_embed[:, 0, :], postion_id).to(curr_embed.device)
+            if os.getenv("AX_INFER", "false").lower() != "true":
+                lm_hidden = self.base_lm.forward_step(
+                    curr_embed[:, 0, :], torch.tensor([self.base_lm.kv_cache.step()], device=curr_embed.device)
+                ).clone()
+            else:
+                lm_hidden = self.base_lm.forward_step(curr_embed[:, 0, :], postion_id).to(curr_embed.device).clone()
 
             lm_hidden = self.fsq_layer(lm_hidden)
-            # residual_hidden = self.residual_lm.forward_step(
-            #     lm_hidden + curr_embed[:, 0, :], torch.tensor([self.residual_lm.kv_cache.step()], device=curr_embed.device)
-            # ).clone()
-
-            residual_hidden = self.residual_lm.forward_step(lm_hidden + curr_embed[:, 0, :], postion_id).to(curr_embed.device).clone()
+            if os.getenv("AX_INFER", "false").lower() != "true":
+                residual_hidden = self.residual_lm.forward_step(
+                    lm_hidden + curr_embed[:, 0, :], torch.tensor([self.residual_lm.kv_cache.step()], device=curr_embed.device)
+                ).clone()
+            else:
+                residual_hidden = self.residual_lm.forward_step(lm_hidden + curr_embed[:, 0, :], postion_id).to(curr_embed.device).clone()
 
             postion_id += 1
                 
