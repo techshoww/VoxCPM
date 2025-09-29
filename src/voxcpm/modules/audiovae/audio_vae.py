@@ -149,11 +149,12 @@ class CausalEncoder(nn.Module):
 
     def forward(self, x):
         hidden_state = self.block(x)
-        return {
-            "hidden_state": hidden_state,
-            "mu": self.fc_mu(hidden_state),
-            "logvar": self.fc_logvar(hidden_state),
-        }
+        # return {
+        #     "hidden_state": hidden_state,
+        #     "mu": self.fc_mu(hidden_state),
+        #     "logvar": self.fc_logvar(hidden_state),
+        # }
+        return self.fc_mu(hidden_state)
 
 
 class NoiseBlock(nn.Module):
@@ -355,5 +356,7 @@ class AudioVAE(nn.Module):
         if audio_data.ndim == 2:
             audio_data = audio_data.unsqueeze(1)
 
-        audio_data = self.preprocess(audio_data, sample_rate)
-        return self.encoder(audio_data)["mu"]
+        audio_data1 = self.preprocess(audio_data, sample_rate)
+        assert torch.equal(audio_data, audio_data1)
+        out = self.encoder(audio_data1)
+        return out
