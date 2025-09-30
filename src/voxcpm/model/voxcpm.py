@@ -24,6 +24,7 @@ from typing import Tuple, Union, Generator, List
 import torch
 import torch.nn as nn
 import torchaudio
+import numpy as np
 import warnings
 from einops import rearrange
 from pydantic import BaseModel
@@ -37,6 +38,7 @@ from ..modules.locenc import VoxCPMLocEnc
 from ..modules.minicpm4 import MiniCPM4Config, MiniCPMModel
 if os.getenv("AX_INFER", "false").lower() == "true":
     from ..npu_infer.utils_lm import MiniCPMModel_AXInfer
+    from ..npu_infer.utils_axinfer import AxModelInfer
 from .utils import get_dtype, mask_multichar_chinese_tokens
 
 
@@ -145,20 +147,64 @@ class VoxCPMModel(nn.Module):
             config.scalar_quantization_latent_dim, 
             config.scalar_quantization_scale
         ) 
-        self.enc_to_lm_proj = nn.Linear(config.encoder_config.hidden_dim, config.lm_config.hidden_size)
-        self.lm_to_dit_proj = nn.Linear(config.lm_config.hidden_size, config.dit_config.hidden_dim)
-        self.res_to_dit_proj = nn.Linear(config.lm_config.hidden_size, config.dit_config.hidden_dim)
 
-        # Stop Predictor
-        self.stop_proj = nn.Linear(config.lm_config.hidden_size, config.lm_config.hidden_size)
-        self.stop_actn = nn.SiLU()
-        self.stop_head = nn.Linear(config.lm_config.hidden_size, 2, bias=False)
+        if os.getenv("AX_INFER", "false").lower() != "true":
+            self.enc_to_lm_proj = nn.Linear(config.encoder_config.hidden_dim, config.lm_config.hidden_size)
+            self.lm_to_dit_proj = nn.Linear(config.lm_config.hidden_size, config.dit_config.hidden_dim)
+            self.res_to_dit_proj = nn.Linear(config.lm_config.hidden_size, config.dit_config.hidden_dim)
+
+            # Stop Predictor
+            self.stop_proj = nn.Linear(config.lm_config.hidden_size, config.lm_config.hidden_size)
+            self.stop_actn = nn.SiLU()
+            self.stop_head = nn.Linear(config.lm_config.hidden_size, 2, bias=False)
+        else:
+            axmodel_dir = os.getenv("AXMODEL_DIR")
+            self.enc_to_lm_proj = AxModelInfer(f"{axmodel_dir}/axmodels/enc_to_lm_proj.axmodel")
+            self.lm_to_dit_proj = AxModelInfer(f"{axmodel_dir}/axmodels/lm_to_dit_proj.axmodel")
+            self.res_to_dit_proj = AxModelInfer(f"{axmodel_dir}/axmodels/res_to_dit_proj.axmodel")
+            self.stop_predictor = AxModelInfer(f"{axmodel_dir}/axmodels/stop_predictor.axmodel")
 
         # Audio VAE
         self.audio_vae = audio_vae
         self.chunk_size = audio_vae.chunk_size
         self.sample_rate = audio_vae.sample_rate
 
+    def enc_to_lm_proj_infer(self, feat_embed):
+        if os.getenv("AX_INFER", "false").lower() != "true":
+            feat_embed = self.enc_to_lm_proj(feat_embed)
+        else:
+            device = feat_embed.device
+            _,d1,_ = feat_embed.shape
+
+            outputs = []
+            for i in range(d1):
+                out = self.enc_to_lm_proj({"x":feat_embed[:, i:i+1].detach().cpu().numpy()})[0]
+                outputs.append(out)
+            outputs = np.concatenate(outputs, axis=1)
+            feat_embed = torch.from_numpy(outputs).to(device)
+        return feat_embed
+
+    def lm_to_dit_proj_infer(self, x):
+        device = x.device
+        y = self.lm_to_dit_proj({"x":x.detach().cpu().numpy()})[0]
+        y = torch.from_numpy(y).to(device)
+        return y
+    
+    def res_to_dit_proj_infer(self, x):
+        device = x.device
+        y = self.res_to_dit_proj({"x":x.detach().cpu().numpy()})[0]
+        y = torch.from_numpy(y).to(device)
+        return y
+
+    def predict_stop(self, x):
+        if os.getenv("AX_INFER", "false").lower() != "true":
+            ret = self.stop_head(self.stop_actn(self.stop_proj(x))).argmax(dim=-1)
+        else:
+            device = x.device
+            input = {"x":x.detach().cpu().numpy()}
+            ret = self.stop_predictor(input)[0]
+            ret = torch.from_numpy(ret).to(device)
+        return ret
     
     def optimize(self, disable: bool = False):
         # try:
@@ -594,7 +640,7 @@ class VoxCPMModel(nn.Module):
         B, T, P, D = feat.shape
 
         feat_embed = self.feat_encoder(feat)  # [b, t, h_feat]
-        feat_embed = self.enc_to_lm_proj(feat_embed)
+        feat_embed = self.enc_to_lm_proj_infer(feat_embed)
         
         if self.config.lm_config.use_mup:
             scale_emb = self.config.lm_config.scale_emb
@@ -635,8 +681,8 @@ class VoxCPMModel(nn.Module):
 
         postion_id = prefill_len
         for i in tqdm(range(max_len)):
-            dit_hidden_1 = self.lm_to_dit_proj(lm_hidden)  # [b, h_dit]
-            dit_hidden_2 = self.res_to_dit_proj(residual_hidden)  # [b, h_dit]
+            dit_hidden_1 = self.lm_to_dit_proj_infer(lm_hidden)  # [b, h_dit]
+            dit_hidden_2 = self.res_to_dit_proj_infer(residual_hidden)  # [b, h_dit]
             dit_hidden = dit_hidden_1 + dit_hidden_2  # [b, h_dit]
 
             pred_feat = self.feat_decoder(
@@ -650,7 +696,7 @@ class VoxCPMModel(nn.Module):
             )  # [b, p, d]
             
             curr_embed = self.feat_encoder_step(pred_feat.unsqueeze(1))  # b, 1, c
-            curr_embed = self.enc_to_lm_proj(curr_embed)
+            curr_embed = self.enc_to_lm_proj_infer(curr_embed)
             
             pred_feat_seq.append(pred_feat.unsqueeze(1))  # b, 1, p, d
             prefix_feat_cond = pred_feat
@@ -661,7 +707,8 @@ class VoxCPMModel(nn.Module):
                 feat_pred = rearrange(pred_feat_chunk, "b t p d -> b d (t p)", b=B, p=self.patch_size)
                 yield feat_pred, pred_feat_seq
             
-            stop_flag = self.stop_head(self.stop_actn(self.stop_proj(lm_hidden))).argmax(dim=-1)[0].cpu().item()
+            # stop_flag = self.stop_head(self.stop_actn(self.stop_proj(lm_hidden))).argmax(dim=-1)[0].cpu().item()
+            stop_flag = self.predict_stop(lm_hidden)[0].cpu().item()
             if i > min_len and stop_flag == 1:
                 break
     
@@ -695,24 +742,26 @@ class VoxCPMModel(nn.Module):
         tokenizer = LlamaTokenizerFast.from_pretrained(path)
 
         audio_vae = AudioVAE()
-        vae_state_dict = torch.load(
-            os.path.join(path, "audiovae.pth"),
-            map_location="cpu",
-            weights_only=True,
-        )["state_dict"]
 
         model = cls(config, tokenizer, audio_vae)
         lm_dtype = get_dtype(config.dtype)
         model = model.to(lm_dtype)
         model.audio_vae = model.audio_vae.to(torch.float32)
 
-        model_state_dict = torch.load(
-            os.path.join(path, "pytorch_model.bin"),
-            map_location="cpu",
-            weights_only=True,
-        )["state_dict"]
+        if os.getenv("AX_INFER", "false").lower() != "true":
+            vae_state_dict = torch.load(
+                os.path.join(path, "audiovae.pth"),
+                map_location="cpu",
+                weights_only=True,
+            )["state_dict"]
+            
+            model_state_dict = torch.load(
+                os.path.join(path, "pytorch_model.bin"),
+                map_location="cpu",
+                weights_only=True,
+            )["state_dict"]
 
-        for kw, val in vae_state_dict.items():
-            model_state_dict[f"audio_vae.{kw}"] = val
-        model.load_state_dict(model_state_dict, strict=False)
+            for kw, val in vae_state_dict.items():
+                model_state_dict[f"audio_vae.{kw}"] = val
+            model.load_state_dict(model_state_dict, strict=False)
         return model.to(model.device).eval().optimize(disable=not optimize)
