@@ -185,15 +185,21 @@ class VoxCPMModel(nn.Module):
         return feat_embed
 
     def lm_to_dit_proj_infer(self, x):
-        device = x.device
-        y = self.lm_to_dit_proj({"x":x.detach().cpu().numpy()})[0]
-        y = torch.from_numpy(y).to(device)
+        if os.getenv("AX_INFER", "false").lower() != "true":
+            y = self.lm_to_dit_proj(x)
+        else:
+            device = x.device
+            y = self.lm_to_dit_proj({"x":x.detach().cpu().numpy()})[0]
+            y = torch.from_numpy(y).to(device)
         return y
     
     def res_to_dit_proj_infer(self, x):
-        device = x.device
-        y = self.res_to_dit_proj({"x":x.detach().cpu().numpy()})[0]
-        y = torch.from_numpy(y).to(device)
+        if os.getenv("AX_INFER", "false").lower() != "true":
+            y = self.res_to_dit_proj(x)
+        else:
+            device = x.device
+            y = self.res_to_dit_proj({"x":x.detach().cpu().numpy()})[0]
+            y = torch.from_numpy(y).to(device)
         return y
 
     def predict_stop(self, x):

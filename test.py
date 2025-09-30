@@ -12,7 +12,7 @@ except:
 
 os.system(f"rm {output_path}")
 
-from src.voxcpm import VoxCPM
+from voxcpm import VoxCPM
 
 model = VoxCPM.from_pretrained("../../VoxCPM-0.5B", zipenhancer_model_id="speech_zipenhancer_ans_multiloss_16k_base")
 
