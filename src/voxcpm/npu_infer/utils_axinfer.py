@@ -10,7 +10,36 @@ import dill
 import torch
 from torch import nn
 from functools import wraps
+import subprocess
+import re
 
+def run_ax_model_and_get_p99(model_path, warmup=10, repeat=100, group=None):
+    """
+    运行 ax_run_model 命令并返回 99% 耗时（单位：毫秒）
+    """
+    if group is None:
+        cmd = ["ax_run_model", "-m", model_path, "-w", str(warmup), "-r", str(repeat)]
+    else:
+        cmd = ["ax_run_model", "-m", model_path, "-w", str(warmup), "-r", str(repeat), "-g", str(group)]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        output = result.stdout
+
+        # 匹配: 99% =   0.051 ms
+        match = re.search(r'99%\s*=\s*([\d.]+)\s*ms', output)
+        if match:
+            p99_ms = float(match.group(1))
+            return p99_ms
+        else:
+            print(f"⚠️ 未找到 99% 耗时: {model_path}")
+            return None
+    except subprocess.CalledProcessError as e:
+        print(f"❌ 命令失败 ({model_path}): {e}")
+        return None
+    except Exception as e:
+        print(f"💥 异常 ({model_path}): {e}")
+        return None
+    
 class InferEngine:
     def __init__(self, path, provider_options=None):
         self.path = path
@@ -77,12 +106,16 @@ class AxModelInferDynamic:
 class AxModelInfer:
     def __init__(self, axmodel_path, run_dynamic=False, provider_options=None):
         print(f"init model:{axmodel_path}")
+        self.axmodel_path = axmodel_path
         if run_dynamic:
             self.model = AxModelInferDynamic(axmodel_path, provider_options=provider_options)
         else:
             self.model = AxModelInferStatic(axmodel_path, provider_options=provider_options)
 
     def __call__(self, inputs, shape_group=None):
+        if os.getenv("DEBUG_TIME", "false").lower() == "true":
+            time = run_ax_model_and_get_p99(self.axmodel_path, warmup=10, repeat=1000, group=shape_group)
+            print(f"{self.axmodel_path} use time {time} ms")
         try:
             outputs = self.model(inputs, shape_group)
         except Exception as e:
