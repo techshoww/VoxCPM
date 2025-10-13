@@ -14,6 +14,7 @@ os.system(f"rm {output_path}")
 
 from voxcpm import VoxCPM
 
+# os.environ["DEBUG_TIME"] = "true"
 model = VoxCPM.from_pretrained("../../VoxCPM-0.5B", zipenhancer_model_id="speech_zipenhancer_ans_multiloss_16k_base")
 
 t1 = time.time()

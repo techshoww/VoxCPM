@@ -319,8 +319,9 @@ class AudioVAE(nn.Module):
             )
             
         else:
-            self.encoder = AxModelInfer("../../VoxCPM.Axera/model_convert/audio_vae.encoder.onnx")
-            self.decoder = AxModelInfer("../../VoxCPM.Axera/model_convert/audio_vae.decoder.onnx")
+            axmodel_dir = os.getenv("AXMODEL_DIR")
+            self.encoder = AxModelInfer(f"{axmodel_dir}/axmodels/audio_vae.encoder.onnx")
+            self.decoder = AxModelInfer(f"{axmodel_dir}/axmodels/audio_vae.decoder.onnx")
 
     def preprocess(self, audio_data, sample_rate):
         if sample_rate is None:

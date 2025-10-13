@@ -114,7 +114,7 @@ class AxModelInfer:
 
     def __call__(self, inputs, shape_group=None):
         if os.getenv("DEBUG_TIME", "false").lower() == "true" and os.path.splitext(self.axmodel_path)[1]==".axmodel":
-            time = run_ax_model_and_get_p99(self.axmodel_path, warmup=10, repeat=1000, group=shape_group)
+            time = run_ax_model_and_get_p99(self.axmodel_path, warmup=10, repeat=100, group=shape_group)
             print(f"{self.axmodel_path} use time {time} ms")
         try:
             outputs = self.model(inputs, shape_group)
