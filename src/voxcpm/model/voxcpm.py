@@ -179,7 +179,7 @@ class VoxCPMModel(nn.Module):
             t_str = str(time.time())
             np.save(f"{self.calib_dir_stop_predictor}/stop_predictor.x.{t_str}.npy", x.detach().cpu().numpy())
 
-        ret = self.stop_head(self.stop_actn(self.stop_proj(x))).argmax(dim=-1)
+        ret = self.stop_head(self.stop_actn(self.stop_proj(x)))#.argmax(dim=-1)
         
         return ret
 
@@ -686,7 +686,7 @@ class VoxCPMModel(nn.Module):
                 feat_pred = rearrange(pred_feat_chunk, "b t p d -> b d (t p)", b=B, p=self.patch_size)
                 yield feat_pred, pred_feat_seq
             # stop_flag = self.stop_head(self.stop_actn(self.stop_proj(lm_hidden))).argmax(dim=-1)[0].cpu().item()
-            stop_flag = self.predict_stop(lm_hidden)[0].cpu().item()
+            stop_flag = self.predict_stop(lm_hidden).argmax(dim=-1)[0].cpu().item()
             if i > min_len and stop_flag == 1:
                 break
     
