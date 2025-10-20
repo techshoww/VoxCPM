@@ -24,7 +24,7 @@ class VoxCPMLocEnc(nn.Module):
             self.special_tokens = np.load(f"{axmodel_dir}/axmodels/feat_encoder.special_token.npy") 
             self.in_proj = AxModelInfer(f"{axmodel_dir}/axmodels/feat_encoder.in_proj.onnx")
             self.encoder = MiniCPMModel_AXInfer(config, f"{axmodel_dir}/feat_encoder_encoder-axmodels/", 
-                                            "MiniCPMForCausalLM", 256, 512, chunk_len=64)
+                                            "MiniCPMForCausalLM", 3, 3, chunk_len=3)
 
     def forward(self, x):
         """

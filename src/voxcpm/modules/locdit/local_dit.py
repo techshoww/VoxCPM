@@ -98,7 +98,7 @@ class VoxCPMLocDiT(nn.Module):
             self.part1 = AxModelInfer(f"{axmodel_dir}/axmodels/locdit.part1.axmodel")
             self.part3 = AxModelInfer(f"{axmodel_dir}/axmodels/locdit.part3.axmodel")
             self.decoder = MiniCPMModel_AXInfer(config, f"{axmodel_dir}/feat_decoder_estimator_decoder-axmodels/", 
-                                                "MiniCPMForCausalLM", 256, 512, chunk_len=64)
+                                                "MiniCPMForCausalLM", 5, 5, chunk_len=5)
 
 
     def forward(

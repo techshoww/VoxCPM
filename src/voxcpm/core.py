@@ -32,11 +32,11 @@ class VoxCPM:
             self.denoiser = ZipEnhancer(zipenhancer_model_path)
         else:
             self.denoiser = None
-        print("Warm up VoxCPMModel...")
-        self.tts_model.generate(
-            target_text="Hello, this is the first test sentence.",
-            max_len=10,
-        )
+        # print("Warm up VoxCPMModel...")
+        # self.tts_model.generate(
+        #     target_text="Hello, this is the first test sentence.",
+        #     max_len=10,
+        # )
 
     @classmethod
     def from_pretrained(cls,
